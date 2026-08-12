@@ -9,21 +9,21 @@ on:
 permissions:
   contents: read
   security-events: write   # needed to upload SARIF to the Security tab
+  # id-token is granted per-job on log-integrity-agent (OIDC → AWS)
 
 jobs:
   semgrep-scan:
     name: semgrep-scan
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep   # always current Semgrep CLI, avoids the deprecated wrapper action
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: >-
-            p/owasp-top-ten
-            p/security-audit
-        continue-on-error: false   # fail build on findings above config threshold
+        run: semgrep ci --config p/owasp-top-ten --config p/security-audit
+        # semgrep ci exits non-zero on findings above the ruleset's blocking threshold,
+        # which correctly fails this job — no continue-on-error needed
 
   dependency-scan:
     name: dependency-scan
@@ -82,3 +82,112 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
+
+  # Disposable Fargate agent: OIDC → RunTask → wait → read audit object → PR comment.
+  # The agent never talks to GitHub; CI posts the comment with GITHUB_TOKEN.
+  log-integrity-agent:
+    name: log-integrity-agent
+    runs-on: ubuntu-latest
+    needs:
+      - semgrep-scan
+      - dependency-scan
+      - secrets-scan
+      - container-scan
+    # Run even if a scan failed — the agent is meant to review pipeline outcomes.
+    if: always()
+    permissions:
+      id-token: write       # GitHub OIDC → AWS
+      contents: read
+      pull-requests: write  # post findings comment on PRs
+    env:
+      AUDIT_OBJECT_KEY: results/${{ github.run_id }}/${{ github.sha }}.md
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900   # 15-minute session (role ceiling is 3600)
+
+      - name: Run ephemeral ECS Fargate agent task
+        id: run_task
+        run: |
+          set -euo pipefail
+          OVERRIDES=$(jq -nc \
+            --arg bucket "${{ vars.AUDIT_BUCKET_NAME }}" \
+            --arg key "${AUDIT_OBJECT_KEY}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg repo "${{ github.repository }}" \
+            '{containerOverrides:[{name:"agent",environment:[
+              {name:"AUDIT_BUCKET",value:$bucket},
+              {name:"AUDIT_OBJECT_KEY",value:$key},
+              {name:"GITHUB_RUN_ID",value:$run_id},
+              {name:"GITHUB_SHA",value:$sha},
+              {name:"GITHUB_REPOSITORY",value:$repo}
+            ]}]}')
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --task-definition "${{ vars.ECS_TASK_DEFINITION }}" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.ECS_SUBNET_ID }}],securityGroups=[${{ vars.ECS_SECURITY_GROUP_ID }}],assignPublicIp=DISABLED}" \
+            --overrides "${OVERRIDES}" \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "task_arn=${TASK_ARN}" >> "$GITHUB_OUTPUT"
+          echo "Started task: ${TASK_ARN}"
+
+      - name: Wait for agent task to stop
+        run: |
+          set -euo pipefail
+          aws ecs wait tasks-stopped \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --tasks "${{ steps.run_task.outputs.task_arn }}"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --tasks "${{ steps.run_task.outputs.task_arn }}" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+          echo "Container exit code: ${EXIT_CODE}"
+
+      - name: Fetch audit findings from S3
+        id: audit
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/agent
+          if aws s3api head-object \
+            --bucket "${{ vars.AUDIT_BUCKET_NAME }}" \
+            --key "${AUDIT_OBJECT_KEY}" >/dev/null 2>&1; then
+            aws s3 cp "s3://${{ vars.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}" /tmp/agent/findings.md
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            cat > /tmp/agent/findings.md <<EOF
+          No audit object was written at \`s3://${{ vars.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}\`.
+
+          This is expected until the real agent image writes findings there.
+          Task: \`${{ steps.run_task.outputs.task_arn }}\`
+          EOF
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment findings on pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/agent/findings.md', 'utf8');
+            const found = '${{ steps.audit.outputs.found }}' === 'true';
+            const header = found
+              ? '## Log integrity agent findings'
+              : '## Log integrity agent (no audit object yet)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `${header}\n\n${body}`,
+            });

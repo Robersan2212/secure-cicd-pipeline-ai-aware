@@ -1,0 +1,26 @@
+# Terraform — local/private/runtime (do not push)
+terraform/terraform.tfvars
+terraform/terraform.tfvars.json
+terraform/*.auto.tfvars
+terraform/*.auto.tfvars.json
+terraform/backend.hcl
+terraform/.terraform/
+terraform/.terraform.lock.hcl.bak
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfstate.backup
+terraform/tfplan
+terraform/*.tfplan
+terraform/crash.log
+terraform/crash.*.log
+terraform/override.tf
+terraform/override.tf.json
+terraform/*_override.tf
+terraform/*_override.tf.json
+# Accidental AWS CLI extract under instructions (thousands of binaries) — not project source
+terraform/instructions/aws/
+terraform/instructions/awscliv2.zip
+
+# Cursor local
+.cursorignore
+.cursor

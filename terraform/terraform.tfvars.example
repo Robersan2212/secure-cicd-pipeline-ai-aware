@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (gitignored) and replace placeholders.
+# Never commit real account IDs, ARNs, or secret values.
+
+aws_region      = "<REGION>"
+github_org_repo = "<REPO_OWNER>/<REPO_NAME>"
+github_branch   = "<BRANCH>"
+container_image = "<ECR_REPO_URI>:tag"
+
+# Optional overrides (defaults shown in variables.tf):
+# project_name               = "secure-cicd-pipeline-ai-aware"
+# vpc_cidr                   = "10.0.0.0/16"
+# public_subnet_cidr         = "10.0.0.0/24"
+# private_subnet_cidr        = "10.0.1.0/24"
+# object_lock_retention_days = 30
+# log_retention_days         = 14
+# tmpfs_size_mib             = 64

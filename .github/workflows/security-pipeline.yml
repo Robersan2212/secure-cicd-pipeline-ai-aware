@@ -102,17 +102,6 @@ jobs:
     env:
       AUDIT_OBJECT_KEY: results/${{ github.run_id }}/${{ github.sha }}.md
     steps:
-      # Temporary: print OIDC claims only (not the raw JWT) to fix trust-policy sub mismatch.
-      - name: Debug OIDC claims
-        run: |
-          set -euo pipefail
-          TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
-          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
-          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
-          PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PAD))"
-          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq '{sub, aud, repository, repository_owner, iss, job_workflow_ref}'
-
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -149,8 +138,14 @@ jobs:
             --query 'tasks[0].taskArn' \
             --output text)
 
+          if [[ -z "${TASK_ARN}" || "${TASK_ARN}" == "None" ]]; then
+            echo "Failed to start ECS task" >&2
+            exit 1
+          fi
+
           echo "task_arn=${TASK_ARN}" >> "$GITHUB_OUTPUT"
-          echo "Started task: ${TASK_ARN}"
+          # Do not echo task ARN / account IDs — public portfolio logs.
+          echo "Started ECS Fargate agent task."
 
       - name: Wait for agent task to stop
         run: |
@@ -177,11 +172,10 @@ jobs:
             aws s3 cp "s3://${{ vars.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}" /tmp/agent/findings.md
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
-            cat > /tmp/agent/findings.md <<EOF
-          No audit object was written at \`s3://${{ vars.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}\`.
+            cat > /tmp/agent/findings.md <<'EOF'
+          No audit findings object was written for this run.
 
-          This is expected until the real agent image writes findings there.
-          Task: \`${{ steps.run_task.outputs.task_arn }}\`
+          This is expected until the real agent image writes findings to the configured audit location.
           EOF
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi

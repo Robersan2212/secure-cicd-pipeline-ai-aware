@@ -2,11 +2,18 @@
 # Control 5 — Identity: agent runtime task role + separate ECS execution role
 
 locals {
-  # Push workflows on the configured branch (e.g. main).
-  github_oidc_sub_branch = "repo:${var.github_org_repo}:ref:refs/heads/${var.github_branch}"
-  # pull_request workflows (any source branch targeting the repo) use this sub claim —
-  # not refs/heads/<feature>. Still scoped to this one repo; no org or branch wildcards.
-  github_oidc_sub_pull_request = "repo:${var.github_org_repo}:pull_request"
+  # GitHub immutable OIDC subjects (repos using the new claim format):
+  #   repo:OWNER@OWNER_ID/REPO@REPO_ID:pull_request
+  #   repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/heads/<branch>
+  github_oidc_repo_prefix = format(
+    "repo:%s@%s/%s@%s",
+    split("/", var.github_org_repo)[0],
+    var.github_owner_id,
+    split("/", var.github_org_repo)[1],
+    var.github_repo_id,
+  )
+  github_oidc_sub_branch       = "${local.github_oidc_repo_prefix}:ref:refs/heads/${var.github_branch}"
+  github_oidc_sub_pull_request = "${local.github_oidc_repo_prefix}:pull_request"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {

@@ -14,6 +14,16 @@ variable "github_org_repo" {
   type        = string
 }
 
+variable "github_owner_id" {
+  description = "Numeric GitHub owner/user/org ID for immutable OIDC sub claims (from token sub: owner@ID)."
+  type        = string
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository ID for immutable OIDC sub claims (from token sub: repo@ID)."
+  type        = string
+}
+
 variable "github_branch" {
   description = "Branch name allowed to assume the GitHub Actions role (no wildcards)."
   type        = string

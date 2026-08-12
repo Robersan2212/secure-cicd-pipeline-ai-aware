@@ -30,8 +30,15 @@ variable "github_branch" {
 }
 
 variable "container_image" {
-  description = "Container image URI for the agent task (e.g. <ECR_REPO_URI>:tag)."
+  description = "Container image URI for the agent task. Leave empty to use the Terraform ECR repo URI with tag var.container_image_tag."
   type        = string
+  default     = ""
+}
+
+variable "container_image_tag" {
+  description = "Image tag used when container_image is empty (ECR repo from this stack)."
+  type        = string
+  default     = "latest"
 }
 
 variable "vpc_cidr" {

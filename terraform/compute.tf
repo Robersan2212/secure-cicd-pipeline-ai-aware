@@ -2,6 +2,10 @@
 # Control 2 — Capability-dropped, read-only runtime
 # Control 7 — Observability: CloudWatch logs + awslogs driver
 
+locals {
+  agent_image = var.container_image != "" ? var.container_image : "${aws_ecr_repository.agent.repository_url}:${var.container_image_tag}"
+}
+
 resource "aws_cloudwatch_log_group" "agent" {
   # Control 7: explicit retention (never indefinite/unset)
   name              = "/ecs/${var.project_name}-agent"
@@ -32,7 +36,7 @@ resource "aws_ecs_task_definition" "agent" {
   container_definitions = jsonencode([
     {
       name      = "agent"
-      image     = var.container_image
+      image     = local.agent_image
       essential = true
 
       # Control 2: read-only root filesystem
@@ -53,6 +57,17 @@ resource "aws_ecs_task_definition" "agent" {
           }
         ]
       }
+
+      environment = [
+        {
+          name  = "LLM_API_KEY_SECRET_ARN"
+          value = aws_secretsmanager_secret.llm_api_key.arn
+        },
+        {
+          name  = "AWS_DEFAULT_REGION"
+          value = var.aws_region
+        }
+      ]
 
       logConfiguration = {
         # Control 7: awslogs driver pointed at the retention-limited log group

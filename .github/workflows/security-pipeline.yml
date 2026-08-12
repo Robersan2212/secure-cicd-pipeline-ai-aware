@@ -83,7 +83,7 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-  # Disposable Fargate agent: OIDC → RunTask → wait → read audit object → PR comment.
+  # Disposable Fargate agent: upload CI logs → OIDC → RunTask → read audit → PR comment.
   # The agent never talks to GitHub; CI posts the comment with GITHUB_TOKEN.
   log-integrity-agent:
     name: log-integrity-agent
@@ -98,42 +98,110 @@ jobs:
     permissions:
       id-token: write       # GitHub OIDC → AWS
       contents: read
+      actions: read         # download sibling job logs for the agent
       pull-requests: write  # post findings comment on PRs
     env:
       AUDIT_OBJECT_KEY: results/${{ github.run_id }}/${{ github.sha }}.md
+      LOGS_PREFIX: logs/${{ github.run_id }}
     steps:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
           role-duration-seconds: 900   # 15-minute session (role ceiling is 3600)
           audience: sts.amazonaws.com
+
+      - name: Collect sibling job logs and upload for agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          WORK="$(mktemp -d)"
+          mkdir -p "${WORK}/logs"
+
+          gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | select(.name != "log-integrity-agent") | {id,name,conclusion,status}' \
+            > "${WORK}/jobs.jsonl"
+
+          MANIFEST_JOBS='[]'
+          while IFS= read -r row; do
+            [[ -z "$row" ]] && continue
+            JOB_ID=$(echo "$row" | jq -r .id)
+            JOB_NAME=$(echo "$row" | jq -r .name)
+            CONCLUSION=$(echo "$row" | jq -r .conclusion)
+            STATUS=$(echo "$row" | jq -r .status)
+            SAFE_NAME=$(echo "$JOB_NAME" | tr -c 'A-Za-z0-9._-' '_' )
+            LOG_FILE="${WORK}/logs/${SAFE_NAME}.txt"
+            LOG_KEY="${LOGS_PREFIX}/${SAFE_NAME}.txt"
+
+            # Job logs endpoint returns a zip; extract text best-effort.
+            if gh api "repos/${{ github.repository }}/actions/jobs/${JOB_ID}/logs" > "${WORK}/${JOB_ID}.zip" 2>/dev/null; then
+              if unzip -l "${WORK}/${JOB_ID}.zip" >/dev/null 2>&1; then
+                unzip -p "${WORK}/${JOB_ID}.zip" > "${LOG_FILE}" 2>/dev/null || true
+              else
+                # Sometimes the API returns plain text.
+                mv "${WORK}/${JOB_ID}.zip" "${LOG_FILE}"
+              fi
+            fi
+
+            if [[ ! -s "${LOG_FILE:-}" ]]; then
+              echo "(no log body downloaded for ${JOB_NAME})" > "${LOG_FILE}"
+            fi
+
+            aws s3 cp "${LOG_FILE}" "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${LOG_KEY}" --only-show-errors
+
+            MANIFEST_JOBS=$(echo "$MANIFEST_JOBS" | jq \
+              --arg name "$JOB_NAME" \
+              --arg conclusion "$CONCLUSION" \
+              --arg status "$STATUS" \
+              --arg log_key "$LOG_KEY" \
+              '. + [{name:$name, conclusion:$conclusion, status:$status, log_key:$log_key}]')
+          done < "${WORK}/jobs.jsonl"
+
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg sha "${{ github.sha }}" \
+            --argjson jobs "$MANIFEST_JOBS" \
+            '{repository:$repo, run_id:$run_id, sha:$sha, jobs:$jobs}' \
+            > "${WORK}/manifest.json"
+
+          aws s3 cp "${WORK}/manifest.json" \
+            "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${LOGS_PREFIX}/manifest.json" \
+            --only-show-errors
+
+          echo "Uploaded job logs and manifest for agent analysis."
 
       - name: Run ephemeral ECS Fargate agent task
         id: run_task
         run: |
           set -euo pipefail
           OVERRIDES=$(jq -nc \
-            --arg bucket "${{ vars.AUDIT_BUCKET_NAME }}" \
+            --arg bucket "${{ secrets.AUDIT_BUCKET_NAME }}" \
             --arg key "${AUDIT_OBJECT_KEY}" \
+            --arg logs "${LOGS_PREFIX}" \
+            --arg secret "${{ secrets.LLM_API_KEY_SECRET_ARN }}" \
             --arg run_id "${{ github.run_id }}" \
             --arg sha "${{ github.sha }}" \
             --arg repo "${{ github.repository }}" \
             '{containerOverrides:[{name:"agent",environment:[
               {name:"AUDIT_BUCKET",value:$bucket},
               {name:"AUDIT_OBJECT_KEY",value:$key},
+              {name:"LOGS_PREFIX",value:$logs},
+              {name:"LLM_API_KEY_SECRET_ARN",value:$secret},
               {name:"GITHUB_RUN_ID",value:$run_id},
               {name:"GITHUB_SHA",value:$sha},
               {name:"GITHUB_REPOSITORY",value:$repo}
             ]}]}')
 
           TASK_ARN=$(aws ecs run-task \
-            --cluster "${{ vars.ECS_CLUSTER }}" \
-            --task-definition "${{ vars.ECS_TASK_DEFINITION }}" \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --task-definition "${{ secrets.ECS_TASK_DEFINITION }}" \
             --launch-type FARGATE \
             --platform-version LATEST \
-            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.ECS_SUBNET_ID }}],securityGroups=[${{ vars.ECS_SECURITY_GROUP_ID }}],assignPublicIp=DISABLED}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.ECS_SUBNET_ID }}],securityGroups=[${{ secrets.ECS_SECURITY_GROUP_ID }}],assignPublicIp=DISABLED}" \
             --overrides "${OVERRIDES}" \
             --query 'tasks[0].taskArn' \
             --output text)
@@ -144,18 +212,17 @@ jobs:
           fi
 
           echo "task_arn=${TASK_ARN}" >> "$GITHUB_OUTPUT"
-          # Do not echo task ARN / account IDs — public portfolio logs.
           echo "Started ECS Fargate agent task."
 
       - name: Wait for agent task to stop
         run: |
           set -euo pipefail
           aws ecs wait tasks-stopped \
-            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
             --tasks "${{ steps.run_task.outputs.task_arn }}"
 
           EXIT_CODE=$(aws ecs describe-tasks \
-            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
             --tasks "${{ steps.run_task.outputs.task_arn }}" \
             --query 'tasks[0].containers[0].exitCode' \
             --output text)
@@ -167,15 +234,15 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/agent
           if aws s3api head-object \
-            --bucket "${{ vars.AUDIT_BUCKET_NAME }}" \
+            --bucket "${{ secrets.AUDIT_BUCKET_NAME }}" \
             --key "${AUDIT_OBJECT_KEY}" >/dev/null 2>&1; then
-            aws s3 cp "s3://${{ vars.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}" /tmp/agent/findings.md
+            aws s3 cp "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}" /tmp/agent/findings.md --only-show-errors
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             cat > /tmp/agent/findings.md <<'EOF'
           No audit findings object was written for this run.
 
-          This is expected until the real agent image writes findings to the configured audit location.
+          This usually means the agent image is missing, failed before writing, or logs were unavailable.
           EOF
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi

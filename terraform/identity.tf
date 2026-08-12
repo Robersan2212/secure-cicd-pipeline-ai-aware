@@ -122,6 +122,33 @@ data "aws_iam_policy_document" "github_actions" {
     ]
   }
 
+  statement {
+    sid    = "UploadCiLogsForAgent"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.audit.arn}/logs/*",
+    ]
+  }
+
+  statement {
+    sid    = "ListAuditBucketForLogUpload"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.audit.arn,
+    ]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["logs/*"]
+    }
+  }
+
   # Control 4: Deny privilege-escalation IAM actions (not iam:*), so the
   # tightly-scoped PassRole Allow above still functions.
   statement {
@@ -194,8 +221,35 @@ data "aws_iam_policy_document" "ecs_task" {
       "s3:PutObject",
     ]
     resources = [
-      "${aws_s3_bucket.audit.arn}/*",
+      "${aws_s3_bucket.audit.arn}/results/*",
     ]
+  }
+
+  statement {
+    sid    = "ReadCiLogs"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.audit.arn}/logs/*",
+    ]
+  }
+
+  statement {
+    sid    = "ListCiLogsPrefix"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.audit.arn,
+    ]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["logs/*"]
+    }
   }
 
   statement {

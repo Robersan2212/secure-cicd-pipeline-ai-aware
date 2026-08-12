@@ -7,7 +7,10 @@ github_org_repo = "<REPO_OWNER>/<REPO_NAME>"
 github_owner_id = "<GITHUB_OWNER_ID>"
 github_repo_id  = "<GITHUB_REPO_ID>"
 github_branch   = "<BRANCH>"
-container_image = "<ECR_REPO_URI>:tag"
+
+# Leave empty to use this stack's ECR repo + container_image_tag
+container_image     = ""
+container_image_tag = "latest"
 
 # Optional overrides (defaults shown in variables.tf):
 # project_name               = "secure-cicd-pipeline-ai-aware"

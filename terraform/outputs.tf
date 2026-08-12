@@ -62,3 +62,13 @@ output "cloudwatch_log_group_name" {
   description = "CloudWatch log group name for the ECS task."
   value       = aws_cloudwatch_log_group.agent.name
 }
+
+output "ecr_repository_url" {
+  description = "ECR repository URL for the agent image (push here, then apply/use tag)."
+  value       = aws_ecr_repository.agent.repository_url
+}
+
+output "agent_image" {
+  description = "Image URI wired into the ECS task definition."
+  value       = local.agent_image
+}

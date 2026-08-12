@@ -102,12 +102,24 @@ jobs:
     env:
       AUDIT_OBJECT_KEY: results/${{ github.run_id }}/${{ github.sha }}.md
     steps:
+      # Temporary: print OIDC claims only (not the raw JWT) to fix trust-policy sub mismatch.
+      - name: Debug OIDC claims
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
+          PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PAD))"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq '{sub, aud, repository, repository_owner, iss, job_workflow_ref}'
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-duration-seconds: 900   # 15-minute session (role ceiling is 3600)
+          audience: sts.amazonaws.com
 
       - name: Run ephemeral ECS Fargate agent task
         id: run_task

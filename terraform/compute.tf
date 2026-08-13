@@ -3,7 +3,8 @@
 # Control 7 — Observability: CloudWatch logs + awslogs driver
 
 locals {
-  agent_image = var.container_image != "" ? var.container_image : "${aws_ecr_repository.agent.repository_url}:${var.container_image_tag}"
+  agent_image  = var.container_image != "" ? var.container_image : "${aws_ecr_repository.agent.repository_url}:${var.container_image_tag}"
+  triage_image = var.triage_container_image != "" ? var.triage_container_image : "${aws_ecr_repository.triage_agent.repository_url}:${var.triage_container_image_tag}"
 }
 
 resource "aws_cloudwatch_log_group" "agent" {
@@ -76,6 +77,60 @@ resource "aws_ecs_task_definition" "agent" {
           "awslogs-group"         = aws_cloudwatch_log_group.agent.name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "agent"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_task_definition" "triage" {
+  # Second ephemeral agent: same hardened Fargate profile as log-integrity
+  family                   = "${var.project_name}-triage"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "agent"
+      image     = local.triage_image
+      essential = true
+
+      readonlyRootFilesystem = true
+
+      linuxParameters = {
+        capabilities = {
+          drop = ["ALL"]
+        }
+        tmpfs = [
+          {
+            containerPath = "/tmp"
+            size          = var.tmpfs_size_mib
+            mountOptions  = ["rw", "noexec", "nosuid", "nodev"]
+          }
+        ]
+      }
+
+      environment = [
+        {
+          name  = "LLM_API_KEY_SECRET_ARN"
+          value = aws_secretsmanager_secret.llm_api_key.arn
+        },
+        {
+          name  = "AWS_DEFAULT_REGION"
+          value = var.aws_region
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.agent.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "triage"
         }
       }
     }

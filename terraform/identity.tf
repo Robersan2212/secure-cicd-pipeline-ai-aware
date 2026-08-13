@@ -83,6 +83,7 @@ data "aws_iam_policy_document" "github_actions" {
     ]
     resources = [
       aws_ecs_task_definition.agent.arn,
+      aws_ecs_task_definition.triage.arn,
       aws_ecs_cluster.agent.arn,
     ]
   }
@@ -134,6 +135,17 @@ data "aws_iam_policy_document" "github_actions" {
   }
 
   statement {
+    sid    = "UploadScanFindingsForTriage"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.audit.arn}/findings/*",
+    ]
+  }
+
+  statement {
     sid    = "ListAuditBucketForLogUpload"
     effect = "Allow"
     actions = [
@@ -145,7 +157,7 @@ data "aws_iam_policy_document" "github_actions" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["logs/*"]
+      values   = ["logs/*", "findings/*"]
     }
   }
 
@@ -226,6 +238,17 @@ data "aws_iam_policy_document" "ecs_task" {
   }
 
   statement {
+    sid    = "AppendTriageSummaries"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.audit.arn}/triage/*",
+    ]
+  }
+
+  statement {
     sid    = "ReadCiLogs"
     effect = "Allow"
     actions = [
@@ -233,6 +256,28 @@ data "aws_iam_policy_document" "ecs_task" {
     ]
     resources = [
       "${aws_s3_bucket.audit.arn}/logs/*",
+    ]
+  }
+
+  statement {
+    sid    = "ReadIntegrityResults"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.audit.arn}/results/*",
+    ]
+  }
+
+  statement {
+    sid    = "ReadScanFindings"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.audit.arn}/findings/*",
     ]
   }
 
@@ -248,7 +293,7 @@ data "aws_iam_policy_document" "ecs_task" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["logs/*"]
+      values   = ["logs/*", "findings/*", "results/*"]
     }
   }
 

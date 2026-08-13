@@ -41,6 +41,18 @@ variable "container_image_tag" {
   default     = "latest"
 }
 
+variable "triage_container_image" {
+  description = "Container image URI for the triage task. Leave empty to use the triage ECR repo URI with tag var.triage_container_image_tag."
+  type        = string
+  default     = ""
+}
+
+variable "triage_container_image_tag" {
+  description = "Image tag used when triage_container_image is empty."
+  type        = string
+  default     = "latest"
+}
+
 variable "vpc_cidr" {
   description = "CIDR block for the VPC."
   type        = string

@@ -220,11 +220,65 @@ def write_audit(bucket: str, key: str, report: str) -> None:
     )
 
 
+def write_integrity_status(
+    bucket: str,
+    key: str,
+    *,
+    passed: bool,
+    run_id: str,
+    sha: str,
+) -> None:
+    """Machine-readable gate for the triage agent (fail closed if missing)."""
+    s3 = boto3.client("s3")
+    body = json.dumps(
+        {"passed": passed, "run_id": run_id, "sha": sha},
+        separators=(",", ":"),
+    )
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="application/json; charset=utf-8",
+    )
+
+
+def analysis_indicates_pass(analysis: str) -> bool:
+    """Return True only on an explicit no-mismatch verdict; else fail closed."""
+    lower = analysis.lower()
+    if any(
+        marker in lower
+        for marker in (
+            "no log body",
+            "no job logs",
+            "without log data",
+            "impossible to verify",
+            "no log content was available",
+        )
+    ):
+        return False
+    if "no mismatches" in lower or "no conclusion/log mismatches" in lower:
+        return True
+    if "mismatch" in lower:
+        return False
+    return False
+
+
+def integrity_object_key() -> str:
+    explicit = os.environ.get("INTEGRITY_OBJECT_KEY", "")
+    if explicit:
+        return explicit
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if run_id:
+        return f"results/{run_id}/integrity.json"
+    raise SystemExit("missing INTEGRITY_OBJECT_KEY or GITHUB_RUN_ID")
+
+
 def main() -> None:
     bucket = env("AUDIT_BUCKET")
     audit_key = env("AUDIT_OBJECT_KEY")
     logs_prefix = env("LOGS_PREFIX")
     secret_arn = env("LLM_API_KEY_SECRET_ARN")
+    status_key = integrity_object_key()
 
     print("loading LLM credentials from Secrets Manager", flush=True)
     api_key, api_url, model, provider = load_llm_credentials(secret_arn)
@@ -232,13 +286,19 @@ def main() -> None:
     # Do not log bucket names in portfolio-friendly mode; keep high-level progress only.
     print("downloading CI logs from S3", flush=True)
     manifest, jobs = download_logs(bucket, logs_prefix)
+    run_id = str(manifest.get("run_id") or os.environ.get("GITHUB_RUN_ID") or "unknown")
+    sha = str(manifest.get("sha") or os.environ.get("GITHUB_SHA") or "unknown")
+
     if not jobs:
         report = (
             "## Log integrity agent findings\n\n"
             "No job logs were available under the provided logs prefix.\n"
         )
         write_audit(bucket, audit_key, report)
-        print("wrote empty-log audit object", flush=True)
+        write_integrity_status(
+            bucket, status_key, passed=False, run_id=run_id, sha=sha
+        )
+        print("wrote empty-log audit object; integrity passed=false", flush=True)
         return
 
     prompt = build_prompt(manifest, jobs)
@@ -246,15 +306,19 @@ def main() -> None:
 
     print(f"calling LLM provider={provider} model={model}", flush=True)
     analysis = call_llm(api_key, api_url, model, provider, prompt)
+    passed = analysis_indicates_pass(analysis)
 
     report = (
         "## Log integrity agent findings\n\n"
         f"- Jobs analyzed: {len(jobs)}\n"
-        f"- Workflow run: `{manifest.get('run_id', 'unknown')}`\n\n"
+        f"- Workflow run: `{run_id}`\n\n"
         f"{analysis.strip()}\n"
     )
     write_audit(bucket, audit_key, report)
-    print("wrote audit findings object", flush=True)
+    write_integrity_status(
+        bucket, status_key, passed=passed, run_id=run_id, sha=sha
+    )
+    print(f"wrote audit findings object; integrity passed={passed}", flush=True)
 
 
 if __name__ == "__main__":

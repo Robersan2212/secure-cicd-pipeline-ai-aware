@@ -5,6 +5,9 @@
 2. Loads the LLM API key from Secrets Manager
 3. Calls Anthropic Messages API by default (`sk-ant-*`), or OpenAI-compatible Chat Completions when configured
 4. Writes a Markdown report to `results/<run_id>/<sha>.md` on the audit bucket
+5. Writes a machine-readable gate file to `results/<run_id>/integrity.json` for the triage agent:
+   `{"passed": true|false, "run_id": "...", "sha": "..."}`  
+   `passed` is true only when the review completes and reports no conclusion/log mismatches; missing logs or unclear output → `false` (fail closed for triage).
 
 ## Build and push (after `terraform apply` creates ECR)
 
@@ -17,14 +20,23 @@ ECR_URL=$(terraform output -raw ecr_repository_url)
 aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ECR_URL"
 
-cd ../agent
+cd ../agent/log-integrity-agent
 docker build -t "${ECR_URL}:latest" .
 docker push "${ECR_URL}:latest"
 ```
 
 If the task definition already pointed at `:latest`, force a new deployment by
-re-running apply or registering a new revision (any no-op apply that replaces
-the task definition). Prefer an immutable tag (`v1`) in production.
+re-running apply or registering a new revision. Prefer an immutable tag (`v1`) in production.
+
+## Runtime env
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `AUDIT_BUCKET` | yes | Audit bucket name |
+| `AUDIT_OBJECT_KEY` | yes | Markdown report key (`results/<run_id>/<sha>.md`) |
+| `LOGS_PREFIX` | yes | CI logs prefix (`logs/<run_id>`) |
+| `LLM_API_KEY_SECRET_ARN` | yes | Secrets Manager ARN |
+| `INTEGRITY_OBJECT_KEY` | recommended | Gate JSON key (default `results/$GITHUB_RUN_ID/integrity.json`) |
+| `GITHUB_RUN_ID` / `GITHUB_SHA` | recommended | Used for integrity.json fields / key fallback |
 
 ## Secret format
 `aws secretsmanager put-secret-value` may use either:

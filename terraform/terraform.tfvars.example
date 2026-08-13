@@ -12,6 +12,10 @@ github_branch   = "<BRANCH>"
 container_image     = ""
 container_image_tag = "latest"
 
+# Triage agent image (leave empty to use triage ECR + tag)
+triage_container_image     = ""
+triage_container_image_tag = "latest"
+
 # Optional overrides (defaults shown in variables.tf):
 # project_name               = "secure-cicd-pipeline-ai-aware"
 # vpc_cidr                   = "10.0.0.0/16"

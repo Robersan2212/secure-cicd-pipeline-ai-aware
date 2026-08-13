@@ -29,8 +29,18 @@ output "ecs_task_definition_arn" {
 }
 
 output "ecs_task_definition_family" {
-  description = "ECS task definition family name."
+  description = "ECS task definition family name for log-integrity."
   value       = aws_ecs_task_definition.agent.family
+}
+
+output "ecs_triage_task_definition_arn" {
+  description = "ECS task definition ARN for the triage agent."
+  value       = aws_ecs_task_definition.triage.arn
+}
+
+output "ecs_triage_task_definition_family" {
+  description = "ECS task definition family name for triage."
+  value       = aws_ecs_task_definition.triage.family
 }
 
 output "private_subnet_id" {
@@ -64,11 +74,21 @@ output "cloudwatch_log_group_name" {
 }
 
 output "ecr_repository_url" {
-  description = "ECR repository URL for the agent image (push here, then apply/use tag)."
+  description = "ECR repository URL for the log-integrity agent image."
   value       = aws_ecr_repository.agent.repository_url
 }
 
+output "ecr_triage_repository_url" {
+  description = "ECR repository URL for the triage agent image."
+  value       = aws_ecr_repository.triage_agent.repository_url
+}
+
 output "agent_image" {
-  description = "Image URI wired into the ECS task definition."
+  description = "Image URI wired into the log-integrity ECS task definition."
   value       = local.agent_image
+}
+
+output "triage_image" {
+  description = "Image URI wired into the triage ECS task definition."
+  value       = local.triage_image
 }

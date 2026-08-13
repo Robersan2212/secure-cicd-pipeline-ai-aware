@@ -256,9 +256,21 @@ def analysis_indicates_pass(analysis: str) -> bool:
         )
     ):
         return False
-    if "no mismatches" in lower or "no conclusion/log mismatches" in lower:
+    # Explicit clean verdicts (must check before bare "mismatch").
+    if any(
+        marker in lower
+        for marker in (
+            "no mismatches",
+            "no clear mismatches",
+            "no conclusion/log mismatches",
+            "no inconsistencies",
+            "no inconsistency",
+            "all reported failures are substantiated",
+            "consistent with those conclusions",
+        )
+    ):
         return True
-    if "mismatch" in lower:
+    if "mismatch" in lower or "inconsistenc" in lower:
         return False
     return False
 

@@ -30,9 +30,16 @@ SYSTEM_PROMPT = (
     "You are a CI log-integrity reviewer. Compare each job's reported "
     "conclusion (success/failure) with the log content. Flag only clear "
     "mismatches (e.g. reported success but log shows fatal errors / reported "
-    "failure but log shows clean success). Be concise. Reply in GitHub-flavored "
-    "Markdown with a short summary and a bullet list of findings. If nothing "
-    "looks inconsistent, say so explicitly."
+    "failure but log shows clean success). "
+    "Reply with a single JSON object only (no markdown fences) using exactly "
+    "these keys: "
+    'passed (boolean — true only if every job conclusion is consistent with '
+    "its logs and you found no mismatches; false if any mismatch exists or "
+    "logs are insufficient to verify), "
+    "markdown (string — GitHub-flavored Markdown summary with a short overview "
+    "and a bullet list of findings). "
+    "Do not put the boolean only inside the markdown; passed must be a real "
+    "JSON boolean."
 )
 
 ANTHROPIC_DEFAULT_URL = "https://api.anthropic.com/v1/messages"
@@ -242,37 +249,34 @@ def write_integrity_status(
     )
 
 
-def analysis_indicates_pass(analysis: str) -> bool:
-    """Return True only on an explicit no-mismatch verdict; else fail closed."""
-    lower = analysis.lower()
-    if any(
-        marker in lower
-        for marker in (
-            "no log body",
-            "no job logs",
-            "without log data",
-            "impossible to verify",
-            "no log content was available",
+def parse_integrity_response(raw: str) -> tuple[bool, str]:
+    """
+    Parse the model JSON contract: {"passed": bool, "markdown": str}.
+    Fail closed: any parse/schema failure → passed=False and a short fallback
+    markdown that includes a truncated raw response for humans.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+        assert isinstance(data, dict)
+        passed = data["passed"]
+        markdown = data["markdown"]
+        assert isinstance(passed, bool)
+        assert isinstance(markdown, str) and markdown.strip()
+        return passed, markdown.strip()
+    except (AssertionError, KeyError, TypeError, json.JSONDecodeError, ValueError):
+        fallback = (
+            "## Log integrity agent findings\n\n"
+            "Model response was not valid JSON with boolean `passed` and "
+            "`markdown` fields. Integrity gate set to **failed** (fail closed).\n\n"
+            "```\n"
+            f"{redact_secrets(raw[:1500], '')}\n"
+            "```\n"
         )
-    ):
-        return False
-    # Explicit clean verdicts (must check before bare "mismatch").
-    if any(
-        marker in lower
-        for marker in (
-            "no mismatches",
-            "no clear mismatches",
-            "no conclusion/log mismatches",
-            "no inconsistencies",
-            "no inconsistency",
-            "all reported failures are substantiated",
-            "consistent with those conclusions",
-        )
-    ):
-        return True
-    if "mismatch" in lower or "inconsistenc" in lower:
-        return False
-    return False
+        return False, fallback
 
 
 def integrity_object_key() -> str:
@@ -317,14 +321,15 @@ def main() -> None:
     (TMP / "prompt.txt").write_text(prompt, encoding="utf-8")
 
     print(f"calling LLM provider={provider} model={model}", flush=True)
-    analysis = call_llm(api_key, api_url, model, provider, prompt)
-    passed = analysis_indicates_pass(analysis)
+    raw = call_llm(api_key, api_url, model, provider, prompt)
+    passed, analysis_md = parse_integrity_response(raw)
 
     report = (
         "## Log integrity agent findings\n\n"
         f"- Jobs analyzed: {len(jobs)}\n"
-        f"- Workflow run: `{run_id}`\n\n"
-        f"{analysis.strip()}\n"
+        f"- Workflow run: `{run_id}`\n"
+        f"- Integrity passed: `{passed}`\n\n"
+        f"{analysis_md}\n"
     )
     write_audit(bucket, audit_key, report)
     write_integrity_status(

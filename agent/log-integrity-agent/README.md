@@ -7,7 +7,9 @@
 4. Writes a Markdown report to `results/<run_id>/<sha>.md` on the audit bucket
 5. Writes a machine-readable gate file to `results/<run_id>/integrity.json` for the triage agent:
    `{"passed": true|false, "run_id": "...", "sha": "..."}`  
-   `passed` is true only when the review completes and reports no conclusion/log mismatches; missing logs or unclear output → `false` (fail closed for triage).
+   `passed` comes from a **structured LLM JSON field** (`{"passed": bool, "markdown": "..."}`),
+   not from keyword heuristics on freeform text. Missing logs or invalid model JSON → `false`
+   (fail closed for triage).
 
 ## Build and push (after `terraform apply` creates ECR)
 

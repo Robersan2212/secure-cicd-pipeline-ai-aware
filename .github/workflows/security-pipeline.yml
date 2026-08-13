@@ -120,10 +120,38 @@ jobs:
           WORK="$(mktemp -d)"
           mkdir -p "${WORK}/logs"
 
+          # List sibling jobs (exclude this agent job).
           gh api --paginate \
             "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
             --jq '.jobs[] | select(.name != "log-integrity-agent") | {id,name,conclusion,status}' \
             > "${WORK}/jobs.jsonl"
+
+          download_job_logs() {
+            local job_id="$1"
+            local out="$2"
+            # Logs API returns 302 → short-lived signed URL. Use curl -L (not gh api):
+            # gh often fails the redirect / auth-header handoff and leaves an empty body.
+            local code
+            code=$(curl -sS -L -o "${out}" -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/jobs/${job_id}/logs" \
+              || true)
+            echo "${code}"
+          }
+
+          extract_log_text() {
+            local archive="$1"
+            local dest="$2"
+            if unzip -l "${archive}" >/dev/null 2>&1; then
+              # Job log zips can contain multiple *.txt files; concatenate them.
+              unzip -p "${archive}" > "${dest}" 2>/dev/null || true
+            else
+              # Some responses are already plain text.
+              cp "${archive}" "${dest}" 2>/dev/null || true
+            fi
+          }
 
           MANIFEST_JOBS='[]'
           while IFS= read -r row; do
@@ -135,19 +163,17 @@ jobs:
             SAFE_NAME=$(echo "$JOB_NAME" | tr -c 'A-Za-z0-9._-' '_' )
             LOG_FILE="${WORK}/logs/${SAFE_NAME}.txt"
             LOG_KEY="${LOGS_PREFIX}/${SAFE_NAME}.txt"
+            RAW="${WORK}/${JOB_ID}.bin"
 
-            # Job logs endpoint returns a zip; extract text best-effort.
-            if gh api "repos/${{ github.repository }}/actions/jobs/${JOB_ID}/logs" > "${WORK}/${JOB_ID}.zip" 2>/dev/null; then
-              if unzip -l "${WORK}/${JOB_ID}.zip" >/dev/null 2>&1; then
-                unzip -p "${WORK}/${JOB_ID}.zip" > "${LOG_FILE}" 2>/dev/null || true
-              else
-                # Sometimes the API returns plain text.
-                mv "${WORK}/${JOB_ID}.zip" "${LOG_FILE}"
-              fi
+            HTTP_CODE=$(download_job_logs "${JOB_ID}" "${RAW}")
+            echo "job=${JOB_NAME} id=${JOB_ID} logs_http=${HTTP_CODE} bytes=$(wc -c < "${RAW}" 2>/dev/null || echo 0)"
+
+            if [[ "${HTTP_CODE}" == "200" && -s "${RAW}" ]]; then
+              extract_log_text "${RAW}" "${LOG_FILE}"
             fi
 
             if [[ ! -s "${LOG_FILE:-}" ]]; then
-              echo "(no log body downloaded for ${JOB_NAME})" > "${LOG_FILE}"
+              echo "(no log body downloaded for ${JOB_NAME}; http=${HTTP_CODE})" > "${LOG_FILE}"
             fi
 
             aws s3 cp "${LOG_FILE}" "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${LOG_KEY}" --only-show-errors

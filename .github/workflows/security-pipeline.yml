@@ -482,7 +482,9 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v8.24.0/gitleaks_8.24.0_linux_x64.tar.gz" \
             | tar -xz gitleaks
           set +e
-          ./gitleaks detect --source /tmp/triage -f json -r /tmp/triage/gitleaks-out.json --exit-code 1
+          # /tmp/triage is not a git repo — scan files only. Write report outside the source dir.
+          ./gitleaks detect --no-git --source /tmp/triage/triage.json \
+            -f json -r /tmp/gitleaks-triage-out.json --exit-code 1
           code=$?
           set -e
           if [[ "${code}" -eq 0 ]]; then

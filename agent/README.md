@@ -3,7 +3,7 @@
 ## What it does
 1. Downloads CI job logs + a status manifest from S3 (`logs/<run_id>/`)
 2. Loads the LLM API key from Secrets Manager
-3. Calls a generic OpenAI-compatible Chat Completions API
+3. Calls Anthropic Messages API by default (`sk-ant-*`), or OpenAI-compatible Chat Completions when configured
 4. Writes a Markdown report to `results/<run_id>/<sha>.md` on the audit bucket
 
 ## Build and push (after `terraform apply` creates ECR)
@@ -28,7 +28,17 @@ the task definition). Prefer an immutable tag (`v1`) in production.
 
 ## Secret format
 `aws secretsmanager put-secret-value` may use either:
-- plain API key string, or
-- JSON: `{"api_key":"...","api_url":"https://api.openai.com/v1/chat/completions","model":"gpt-4o-mini"}`
+- plain API key string (`sk-ant-...` → Anthropic Messages API by default), or
+- JSON:
+  ```json
+  {
+    "api_key": "sk-ant-...",
+    "provider": "anthropic",
+    "api_url": "https://api.anthropic.com/v1/messages",
+    "model": "claude-sonnet-4-20250514"
+  }
+  ```
 
-Optional task env overrides: `LLM_API_URL`, `LLM_MODEL`.
+For OpenAI-compatible APIs, set `"provider": "openai"` (or use a non-`sk-ant-` key).
+
+Optional task env overrides: `LLM_PROVIDER`, `LLM_API_URL`, `LLM_MODEL`.

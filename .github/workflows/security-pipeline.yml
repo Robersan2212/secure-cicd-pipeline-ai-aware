@@ -506,6 +506,17 @@ jobs:
             const data = JSON.parse(fs.readFileSync('/tmp/triage/triage.json', 'utf8'));
             const summarized = data.summarized || [];
             const unsummarized = data.unsummarized || [];
+            const sections = [
+              ['semgrep-scan', 'Semgrep (SAST)'],
+              ['container-scan', 'Container (Trivy)'],
+              ['dependency-scan', 'Dependencies (npm audit)'],
+              ['secrets-scan', 'Secrets (Gitleaks)'],
+            ];
+            const byTool = {};
+            for (const item of summarized) {
+              const t = item.tool || 'unknown';
+              (byTool[t] ||= []).push(item);
+            }
             const lines = [
               '## Triage summary agent',
               '',
@@ -517,11 +528,29 @@ jobs:
             if (summarized.length === 0 && unsummarized.length === 0) {
               lines.push('_No scanner findings were available to triage._');
             }
-            for (const item of summarized) {
-              lines.push(`### ${item.tool} — \`${item.rule_id}\` (${item.severity})`);
-              lines.push(`- Location: \`${item.file_location || 'n/a'}\``);
-              lines.push(`- Summary: ${item.plain_language_summary}`);
-              lines.push(`- Remediation: ${item.suggested_remediation}`);
+            for (const [tool, title] of sections) {
+              const items = byTool[tool] || [];
+              lines.push(`### ${title}`);
+              if (items.length === 0) {
+                lines.push('_No findings selected for this scanner (artifact empty or unavailable)._');
+                lines.push('');
+                continue;
+              }
+              for (const item of items) {
+                lines.push(`#### \`${item.rule_id}\` (${item.severity})`);
+                lines.push(`- Location: \`${item.file_location || 'n/a'}\``);
+                lines.push(`- Summary: ${item.plain_language_summary}`);
+                lines.push(`- Remediation: ${item.suggested_remediation}`);
+                lines.push('');
+              }
+            }
+            const known = new Set(sections.map(([t]) => t));
+            const other = summarized.filter((i) => !known.has(i.tool));
+            if (other.length > 0) {
+              lines.push('### Other');
+              for (const item of other) {
+                lines.push(`- ${item.tool}: \`${item.rule_id}\` (${item.severity})`);
+              }
               lines.push('');
             }
             if (unsummarized.length > 0) {

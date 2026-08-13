@@ -16,14 +16,24 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import boto3
 
 TMP = Path("/tmp")
-MAX_FINDINGS = 25
+# Exactly 4 scanners × 6 findings (no leftover fill from a noisy tool).
+PER_TOOL_QUOTA = 6
+MAX_FINDINGS = PER_TOOL_QUOTA * 4
 MAX_FINDING_CHARS = 4_000
+TOOL_PRIORITY = (
+    "semgrep-scan",
+    "container-scan",
+    "dependency-scan",
+    "secrets-scan",
+)
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 ANTHROPIC_DEFAULT_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -285,33 +295,66 @@ def fetch_findings(run_id: str) -> list[dict[str, Any]]:
             )
             continue
 
-        if "trivy" in name or (isinstance(payload, dict) and payload.get("version") and "runs" in payload and "trivy" in body.lower()):
-            findings.extend(_parse_sarif("container-scan", payload))
-        elif "semgrep" in name or (isinstance(payload, dict) and "runs" in payload and "semgrep" in name):
+        # Classify by filename first. SARIF *bodies* can mention other tools
+        # (e.g. Semgrep rules that reference "trivy" in workflow YAML) and must
+        # not steal another scanner's label.
+        if "semgrep" in name:
             findings.extend(_parse_sarif("semgrep-scan", payload))
-        elif isinstance(payload, dict) and "runs" in payload:
-            tool = "semgrep-scan" if "semgrep" in name else "container-scan" if "trivy" in name else "sarif"
-            findings.extend(_parse_sarif(tool, payload))
-        elif "npm" in name or "audit" in name or (isinstance(payload, dict) and "vulnerabilities" in payload):
-            findings.extend(_parse_npm_audit(payload))
+        elif "trivy" in name:
+            findings.extend(_parse_sarif("container-scan", payload))
         elif "gitleaks" in name or "secret" in name:
             findings.extend(_parse_gitleaks(payload))
+        elif "npm" in name or "audit" in name or (
+            isinstance(payload, dict) and "vulnerabilities" in payload
+        ):
+            findings.extend(_parse_npm_audit(payload))
+        elif isinstance(payload, dict) and "runs" in payload:
+            findings.extend(_parse_sarif("sarif", payload))
         else:
-            # Best-effort SARIF
-            if isinstance(payload, dict) and "runs" in payload:
-                findings.extend(_parse_sarif("sarif", payload))
-            else:
-                findings.append(
-                    {
-                        "tool": "unknown",
-                        "rule_id": name,
-                        "file_location": "n/a",
-                        "severity": "medium",
-                        "message": json.dumps(payload)[:800],
-                    }
-                )
+            findings.append(
+                {
+                    "tool": "unknown",
+                    "rule_id": name,
+                    "file_location": "n/a",
+                    "severity": "medium",
+                    "message": json.dumps(payload)[:800],
+                }
+            )
 
-    return findings[:MAX_FINDINGS]
+    # Log mix before selection (helpful in CloudWatch during demos).
+    raw_counts = Counter(str(f.get("tool") or "unknown") for f in findings)
+    print(f"parsed finding counts by tool: {dict(raw_counts)}", flush=True)
+    selected = select_findings_for_triage(findings)
+    sel_counts = Counter(str(f.get("tool") or "unknown") for f in selected)
+    print(f"selected finding counts by tool: {dict(sel_counts)}", flush=True)
+    return selected
+
+
+def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, int, str]:
+    """Prefer higher severity; within secrets, prefer specific rules over generic-api-key."""
+    sev = _SEVERITY_RANK.get(str(finding.get("severity") or "medium").lower(), 9)
+    rule = str(finding.get("rule_id") or "")
+    generic_penalty = 1 if rule == "generic-api-key" else 0
+    return (sev, generic_penalty, rule)
+
+
+def select_findings_for_triage(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Take up to PER_TOOL_QUOTA findings from each of TOOL_PRIORITY, severity-sorted.
+    No leftover fill — a missing scanner stays empty rather than letting Trivy/Gitleaks expand.
+    """
+    by_tool: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        tool = str(finding.get("tool") or "unknown")
+        by_tool.setdefault(tool, []).append(finding)
+
+    for rows in by_tool.values():
+        rows.sort(key=_finding_sort_key)
+
+    selected: list[dict[str, Any]] = []
+    for tool in TOOL_PRIORITY:
+        selected.extend(by_tool.get(tool, [])[:PER_TOOL_QUOTA])
+    return selected[:MAX_FINDINGS]
 
 
 def _http_json(url: str, payload: dict[str, Any], headers: dict[str, str], api_key: str) -> dict[str, Any]:

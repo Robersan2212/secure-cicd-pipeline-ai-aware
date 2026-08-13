@@ -60,3 +60,9 @@ docker push "${ECR_URL}:latest"
 
 Findings that fail schema / tool-rule cross-check land in `unsummarized`
 without discarding the rest of the run.
+
+## Selection (24-finding cap = 6 × 4 scanners)
+Takes **at most 6** findings from each of: semgrep, container/Trivy, dependency/npm,
+secrets/Gitleaks — severity-sorted within each tool. No leftover fill (Trivy cannot
+expand into empty Semgrep/npm slots). Filenames classify artifacts (Semgrep SARIF
+bodies that mention "trivy" are no longer mislabeled as container findings).

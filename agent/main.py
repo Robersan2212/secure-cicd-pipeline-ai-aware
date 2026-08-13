@@ -36,7 +36,7 @@ SYSTEM_PROMPT = (
 )
 
 ANTHROPIC_DEFAULT_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
 OPENAI_DEFAULT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 
@@ -141,7 +141,6 @@ def call_anthropic(api_key: str, api_url: str, model: str, prompt: str) -> str:
     payload = {
         "model": model,
         "max_tokens": 1024,
-        "temperature": 0,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }

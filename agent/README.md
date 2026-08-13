@@ -35,7 +35,7 @@ the task definition). Prefer an immutable tag (`v1`) in production.
     "api_key": "sk-ant-...",
     "provider": "anthropic",
     "api_url": "https://api.anthropic.com/v1/messages",
-    "model": "claude-sonnet-4-20250514"
+    "model": "claude-sonnet-4-6"
   }
   ```
 

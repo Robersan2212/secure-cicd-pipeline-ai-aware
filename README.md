@@ -8,7 +8,6 @@ plus ephemeral AWS Fargate agents that review log integrity and triage findings.
 - [Architecture](docs/architecture.md) — end-to-end flow, S3 prefixes, pause tips
 - [Log-integrity agent](agent/log-integrity-agent/README.md) — build/push + runtime
 - [Triage agent](agent/triage-agent/README.md) — build/push + integrity gate
-- [Triage build blueprint](agent/triage-agent/triage-agent-build-blueprint.md) — design constraints (see adaptation section)
 
 ## Agents (high level)
 

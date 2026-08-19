@@ -189,6 +189,7 @@ HTTPS calls from the private subnet to the configured LLM provider (Anthropic by
 | `agent/triage-agent/` | Triage container source |
 | `app/` | Application under test (scanners + selected remediation patches) |
 | `docs/architecture.md` | This document |
+| `docs/findings.md` | Selected findings with remediations |
 
 ---
 

@@ -2,7 +2,7 @@
 
 This project is a long-lived AWS security lab for a GitHub Actions CI pipeline. The lab stays up between runs. Individual agent workloads are short-lived ECS Fargate tasks. Scan jobs and PR comments stay in GitHub Actions. The agents never receive a GitHub token.
 
-The application under `app/` (OWASP Juice Shop) is scanned by SAST, dependency, secrets, and container jobs. The pipeline posts integrity and triage reviews on the PR, and selected findings are remediated with concrete patches (for example dependency or configuration fixes called out by the triage summary) to show a find-then-fix loop end to end.
+The application under `app/` (OWASP Juice Shop) is scanned by SAST, dependency, secrets, and container jobs. The pipeline posts integrity and triage reviews on the PR. Selected findings and remediations are documented in [findings.md](findings.md) to show a find-then-fix loop.
 
 ---
 
@@ -42,7 +42,7 @@ Terraform creates the long-lived resources below (see `terraform/`). Outputs fee
 **Identity**
 
 - GitHub Actions OIDC identity provider (trust limited to this repository using immutable owner/repo IDs and allowed branch / pull_request subjects).
-- IAM role for GitHub Actions (`…-github-actions`): short sessions from CI; can `RunTask` / `DescribeTasks`, `PassRole` only the ECS execution and task roles, upload to `logs/*` and `findings/*`, and read audit objects. Explicit denies block privilege-escalation IAM and destructive S3/ECS actions.
+- IAM role for GitHub Actions (`<project>-github-actions`): short sessions from CI; can `RunTask` / `DescribeTasks`, `PassRole` only the ECS execution and task roles, upload to `logs/*` and `findings/*`, and read audit objects. Explicit denies block privilege-escalation IAM and destructive S3/ECS actions.
 - ECS task execution role: pull images from ECR and write CloudWatch logs (AWS managed execution policy).
 - ECS task role (runtime): `GetSecretValue` on the single LLM secret; `GetObject` on `logs/*`, `findings/*`, and `results/*`; `PutObject` on `results/*` and `triage/*`; no `DeleteObject`.
 
@@ -69,11 +69,11 @@ Store the provider API key in the Secrets Manager secret Terraform created (plai
 
 ### 4. Build and push agent images
 
-Human-operated (or scripted) Docker build/push to each ECR URL from Terraform outputs. Task definitions reference `:latest` (or an override tag). A new push is required whenever agent code changes.
+Human-operated (or scripted) Docker build/push to each ECR URL from Terraform outputs. Task definitions reference the `:latest` image tag. A new push is required whenever agent code changes.
 
 ### 5. Wire GitHub Actions secrets
 
-CI reads configuration from repository secrets (no account IDs or ARNs in workflow source). Typical set:
+CI reads configuration from repository secrets (no account IDs or ARNs in workflow source). Required secrets:
 
 - `AWS_ROLE_ARN`, `AWS_REGION`
 - `ECS_CLUSTER`, `ECS_TASK_DEFINITION`, `ECS_TRIAGE_TASK_DEFINITION`
@@ -114,6 +114,12 @@ Inside the task, the agent loads the LLM key from Secrets Manager, compares repo
 - `results/<run_id>/<sha>.md` — human-readable review for the PR.
 - `results/<run_id>/integrity.json` — machine gate: `{"passed": true|false, "run_id", "sha"}`. The boolean comes from a structured model JSON field (`passed` + `markdown`), not keyword guessing on prose. Missing logs or invalid model output → `passed: false`.
 
+PR comment from a successful integrity review (scan jobs failed as expected for the demo app; conclusions matched the logs):
+
+![Log integrity agent PR comment](./images/findings/log-integrity-agent-githubactions.png)
+
+*GitHub Actions posts the Markdown report from S3; the agent never holds a GitHub token.*
+
 ### Stage C — Triage agent
 
 Job `triage-summary-agent` runs after log-integrity (and the scans), `if: always()`.
@@ -132,6 +138,12 @@ Inside the task:
 3. Selects up to **six findings per scanner** (Semgrep, Trivy/container, npm/dependency, Gitleaks/secrets), severity-sorted within each tool. No leftover fill from one noisy scanner. Cap is 24 summarized items.
 4. One LLM call per selected finding; schema validation; failures go to `unsummarized` without discarding the rest.
 5. Writes only `triage/<run_id>.json`. Does not post to GitHub.
+
+PR comment after Gitleaks clears the triage JSON (findings grouped by scanner):
+
+![Triage summary agent PR comment](./images/findings/triage-summary-agent-githubactions.png)
+
+*CI posts the grouped summary; each item includes location, plain-language summary, and remediation.*
 
 ---
 
@@ -167,7 +179,7 @@ Agents do not get `pull-requests: write` or a GitHub PAT. Commenting is a CI res
 | `results/<run_id>/integrity.json` | Log-integrity task | Triage task | Gate between agents |
 | `triage/<run_id>.json` | Triage task | GitHub Actions | Triage PR body (after Gitleaks) |
 
-Object Lock makes published audit objects retention-protected. Re-running the same run id may create new versions; demos should prefer a fresh workflow run when validating gate changes.
+Object Lock makes published audit objects retention-protected. Re-running the same workflow run id may create new object versions under Object Lock.
 
 ### Observability
 
@@ -187,7 +199,7 @@ HTTPS calls from the private subnet to the configured LLM provider (Anthropic by
 | `terraform/` | Lab infrastructure as code |
 | `agent/log-integrity-agent/` | Integrity container source |
 | `agent/triage-agent/` | Triage container source |
-| `app/` | Application under test (scanners + selected remediation patches) |
+| `app/` | Application under test (scanners target this tree) |
 | `docs/architecture.md` | This document |
 | `docs/findings.md` | Selected findings with remediations |
 
@@ -201,4 +213,4 @@ HTTPS calls from the private subnet to the configured LLM provider (Anthropic by
 - An **AI-assisted review loop** with an explicit integrity gate before triage publish.
 - **Ephemeral agent compute** (Fargate tasks exit when done; no always-on application servers).
 - An **immutable audit path** for agent outputs suitable for explaining compliance-minded design choices.
-- A **find-then-fix** demonstration: triage highlights issues and selected findings are patched in follow-up changes.
+- A **find-then-fix** path: triage highlights issues; remediations for selected findings are documented in [findings.md](findings.md).

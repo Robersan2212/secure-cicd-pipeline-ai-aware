@@ -7,6 +7,7 @@ plus ephemeral AWS Fargate agents that review log integrity and triage findings.
 
 - [Architecture](docs/architecture.md) — cloud lab, creation flow, runtime stages, trust boundaries
 - [Findings and remediations](docs/findings.md) — selected triage findings with fix plans
+- [Remediation log](docs/remediation.md) — code changes applied for those findings
 - [Log-integrity agent](agent/log-integrity-agent/README.md) — build/push + runtime
 - [Triage agent](agent/triage-agent/README.md) — build/push + integrity gate
 

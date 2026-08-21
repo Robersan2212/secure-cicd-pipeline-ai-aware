@@ -2,7 +2,7 @@
 
 This project is a long-lived AWS security lab for a GitHub Actions CI pipeline. The lab stays up between runs. Individual agent workloads are short-lived ECS Fargate tasks. Scan jobs and PR comments stay in GitHub Actions. The agents never receive a GitHub token.
 
-The application under `app/` (OWASP Juice Shop) is scanned by SAST, dependency, secrets, and container jobs. The pipeline posts integrity and triage reviews on the PR. Selected findings and remediations are documented in [findings.md](findings.md) to show a find-then-fix loop.
+The application under `app/` (OWASP Juice Shop) is scanned by SAST, dependency, secrets, and container jobs. The pipeline posts integrity and triage reviews on the PR. Selected findings are documented in [findings.md](findings.md); applied code remediations are listed in [remediation.md](remediation.md).
 
 ---
 
@@ -202,6 +202,7 @@ HTTPS calls from the private subnet to the configured LLM provider (Anthropic by
 | `app/` | Application under test (scanners target this tree) |
 | `docs/architecture.md` | This document |
 | `docs/findings.md` | Selected findings with remediations |
+| `docs/remediation.md` | Log of remediations applied for those findings |
 
 ---
 
@@ -213,4 +214,4 @@ HTTPS calls from the private subnet to the configured LLM provider (Anthropic by
 - An **AI-assisted review loop** with an explicit integrity gate before triage publish.
 - **Ephemeral agent compute** (Fargate tasks exit when done; no always-on application servers).
 - An **immutable audit path** for agent outputs suitable for explaining compliance-minded design choices.
-- A **find-then-fix** path: triage highlights issues; remediations for selected findings are documented in [findings.md](findings.md).
+- A **find-then-fix** path: triage highlights issues; remediations for selected findings are applied and logged in [remediation.md](remediation.md).

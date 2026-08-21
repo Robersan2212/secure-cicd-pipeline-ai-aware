@@ -7,6 +7,7 @@
 import z85 from 'z85'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import jwt from 'jsonwebtoken'
 import * as security from '../../lib/insecurity'
 import type { UserModel } from '@juice-shop/models/user'
 import type { Request } from 'express'
@@ -201,6 +202,27 @@ void describe('insecurity', () => {
       assert.equal(security.hmac('admin123'), '6be13e2feeada221f29134db71c0ab0be0e27eccfc0fb436ba4096ba73aafb20')
       assert.equal(security.hmac('password'), 'da28fc4354f4a458508a461fbae364720c4249c27f10fccf68317fc4bf6531ed')
       assert.equal(security.hmac(''), 'f052179ec5894a2e79befa8060cfcb517f1e14f7f6222af854377b6481ae953e')
+    })
+  })
+
+  void describe('jwt.verify algorithms allowlist', () => {
+    void it('rejects tokens that declare alg none', () => {
+      const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+      const payload = Buffer.from(JSON.stringify({ data: { email: 'jim@juice-sh.op' } })).toString('base64url')
+      const unsignedToken = `${header}.${payload}.`
+
+      assert.throws(
+        () => jwt.verify(unsignedToken, security.publicKey, { algorithms: ['RS256'], allowInsecureKeySizes: true })
+      )
+    })
+
+    void it('accepts a token signed with RS256', () => {
+      const token = security.authorize({ data: { email: 'jim@juice-sh.op' } })
+      const decoded = jwt.verify(token, security.publicKey, {
+        algorithms: ['RS256'],
+        allowInsecureKeySizes: true
+      }) as { data: { email: string } }
+      assert.equal(decoded.data.email, 'jim@juice-sh.op')
     })
   })
 })

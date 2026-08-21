@@ -10,6 +10,16 @@ import { RouterTestingModule } from '@angular/router/testing'
 import { ErrorPageComponent } from './error-page/error-page.component'
 import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 
+function fakeJwt (payload: object): string {
+    const b64url = (value: object) =>
+        btoa(JSON.stringify(value))
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/, '')
+
+    return `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url(payload)}.test-sig`
+}
+
 describe('LoginGuard', () => {
     beforeEach(() => {
         TestBed.configureTestingModule({
@@ -42,13 +52,10 @@ describe('LoginGuard', () => {
 
     it('returns payload from decoding a valid JWT', () => {
         const guard = TestBed.inject(LoginGuard)
+        const claims = { sub: '1234567890', name: 'John Doe', iat: 1516239022 }
 
-        localStorage.setItem('token', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c')
-        expect(guard.tokenDecode()).toEqual({
-            sub: '1234567890',
-            name: 'John Doe',
-            iat: 1516239022
-        })
+        localStorage.setItem('token', fakeJwt(claims))
+        expect(guard.tokenDecode()).toEqual(claims)
     })
 
     it('returns nothing when decoding an invalid JWT', () => {

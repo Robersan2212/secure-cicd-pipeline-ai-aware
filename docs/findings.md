@@ -1,6 +1,20 @@
 # Findings and remediations
 
-Selected issues from the triage agent, used to demonstrate a find-then-fix loop. Each entry includes the scanner finding, what exists in this repository today, the planned fix, and screenshots from the triage PR comment and the matching code.
+Selected issues from the triage agent that demonstrate a find-then-fix loop. Each entry covers the scanner finding, what exists in the repository, the remediation, and screenshots from the triage PR comment and the matching code.
+
+## How these findings reach the PR
+
+Log-integrity runs first and must write `integrity.json` with `"passed": true`. That gate is what allows triage to publish:
+
+![Log integrity agent PR comment](./images/findings/log-integrity-agent-githubactions.png)
+
+*Integrity review: job conclusions matched the CI logs (`Integrity passed: true`).*
+
+Triage then summarizes scanner artifacts into a grouped PR comment. The three findings below were selected from that output:
+
+![Triage summary agent PR comment](./images/findings/triage-summary-agent-githubactions.png)
+
+*Triage summary: Semgrep, Trivy, and secrets sections that feed the write-ups below.*
 
 ---
 
@@ -9,7 +23,7 @@ Selected issues from the triage agent, used to demonstrate a find-then-fix loop.
 **Scanner:** Semgrep (SAST)  
 **Rule:** `javascript.express.security.audit.express-check-directory-listing.express-check-directory-listing`  
 **Severity:** medium  
-**Locations:** `app/server.ts` (approximately lines 269, 273, 277)
+**Locations:** `app/server.ts` lines 269, 273, and 277
 
 ### Finding
 
@@ -41,12 +55,12 @@ Similar listing is also enabled under `/support/logs`. Comments in-file mark som
 
 *`app/server.ts` — `serveIndex` usage.*
 
-### How this will be fixed
+### Remediation
 
 Drop `serveIndex` so directories are not browsable. Keep explicit per-file routes where downloads are still needed, and harden any remaining `express.static` mounts:
 
 ```ts
-// app/server.ts — remediations (replace the serveIndex mounts)
+// app/server.ts — replace the serveIndex mounts
 
 // /ftp: file download only, no directory index
 app.use('/ftp(?!/quarantine)/:file', servePublicFiles())
@@ -97,11 +111,14 @@ Direct pins in `app/package.json`:
 "jsonwebtoken": "0.4.0"
 ```
 
-`express-jwt` 0.1.3 also pulls an older nested `jsonwebtoken`. Trivy reports both inside the built image’s `node_modules`. Verify paths (for example in `app/lib/insecurity.ts`) call `jwt.verify` without an `algorithms` allowlist today:
+`express-jwt` 0.1.3 also pulls an older nested `jsonwebtoken`. Trivy reports both inside the built image’s `node_modules`. Call sites such as `app/lib/insecurity.ts` invoke `jwt.verify` without an `algorithms` allowlist:
 
 ```ts
 jwt.verify(token, publicKey, (err: Error | null, decoded: any) => {
-  // ...
+  if (err === null && decoded?.data !== undefined) {
+    authenticatedUsers.put(token, decoded)
+    res.cookie('token', token)
+  }
 })
 ```
 
@@ -109,7 +126,7 @@ jwt.verify(token, publicKey, (err: Error | null, decoded: any) => {
 
 *`app/package.json` — `jsonwebtoken` / `express-jwt` versions.*
 
-### How this will be fixed
+### Remediation
 
 Bump the declared dependencies and force nested copies to a patched `jsonwebtoken` via npm `overrides`:
 
@@ -128,12 +145,15 @@ Bump the declared dependencies and force nested copies to a patched `jsonwebtoke
 }
 ```
 
-Then require an explicit algorithm allowlist on verify (this app signs with `RS256`):
+Require an explicit algorithm allowlist on verify (this app signs with `RS256`):
 
 ```ts
 // app/lib/insecurity.ts (and other jwt.verify call sites)
 jwt.verify(token, publicKey, { algorithms: ['RS256'] }, (err, decoded) => {
-  // ...
+  if (err === null && decoded?.data !== undefined) {
+    authenticatedUsers.put(token, decoded)
+    res.cookie('token', token)
+  }
 })
 ```
 
@@ -146,11 +166,11 @@ Rebuild the app image, re-run Trivy, and confirm CVE-2015-9235 clears (or drops 
 **Scanner:** Secrets (Gitleaks)  
 **Rule:** `jwt`  
 **Severity:** high  
-**Location:** `app/frontend/src/app/app.guard.spec.ts` (representative; the same rule also hit other test files)
+**Location:** `app/frontend/src/app/app.guard.spec.ts` (same rule also hit other test files under `app/`)
 
 ### Finding
 
-Gitleaks flagged a JWT-shaped string committed in a frontend unit test. Tokens in git history are visible to anyone with repo access. Even when the value is only used in tests, the pattern trains bad habits and can leak a real token if someone pastes a live credential later.
+Gitleaks flagged a JWT-shaped string committed in a frontend unit test. Tokens in git history are visible to anyone with repository access. Even when the value is only used in tests, the pattern trains bad habits and can leak a real token if someone pastes a live credential later.
 
 ![Triage finding — hardcoded JWT](./images/findings/03-hardcoded-jwt-triage.png)
 
@@ -167,7 +187,7 @@ In `app.guard.spec.ts`, a full JWT is written into `localStorage` to exercise `t
             name: 'John Doe',
 ```
 
-This particular string is a well-known public example (jwt.io-style demo payload), not an AWS or Anthropic secret. The finding is still correct as a **secrets-in-repo** control: JWT literals should not live in source.
+This string is a well-known public jwt.io-style demo payload, not an AWS or Anthropic secret. The finding is still valid as a **secrets-in-repo** control: JWT literals should not live in source.
 
 Similar Gitleaks `jwt` hits appear in other specs and Cypress tests under `app/`.
 
@@ -175,7 +195,7 @@ Similar Gitleaks `jwt` hits appear in other specs and Cypress tests under `app/`
 
 *`app.guard.spec.ts` — committed JWT string.*
 
-### How this will be fixed
+### Remediation
 
 `tokenDecode()` only base64-decodes the payload (`jwt-decode`); it does not verify a signature. Build the token in the test from the claims object so no compact JWT literal sits in the file:
 
@@ -201,4 +221,4 @@ it('returns payload from decoding a valid JWT', () => {
 })
 ```
 
-Apply the same helper (or an equivalent runtime builder) to the other Gitleaks JWT hits under `app/`, then re-run Gitleaks so the `jwt` rule is clean for those paths.
+Apply the same helper to the other Gitleaks JWT hits under `app/`, then re-run Gitleaks so the `jwt` rule is clean for those paths.

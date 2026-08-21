@@ -1,0 +1,26 @@
+# Copy to terraform.tfvars (gitignored) and replace placeholders.
+# Never commit real account IDs, ARNs, or secret values.
+
+aws_region      = "<REGION>"
+github_org_repo = "<REPO_OWNER>/<REPO_NAME>"
+# From GitHub OIDC token sub (immutable claims), e.g. repo:OWNER@OWNER_ID/REPO@REPO_ID:pull_request
+github_owner_id = "<GITHUB_OWNER_ID>"
+github_repo_id  = "<GITHUB_REPO_ID>"
+github_branch   = "<BRANCH>"
+
+# Leave empty to use this stack's ECR repo + container_image_tag
+container_image     = ""
+container_image_tag = "latest"
+
+# Triage agent image (leave empty to use triage ECR + tag)
+triage_container_image     = ""
+triage_container_image_tag = "latest"
+
+# Optional overrides (defaults shown in variables.tf):
+# project_name               = "secure-cicd-pipeline-ai-aware"
+# vpc_cidr                   = "10.0.0.0/16"
+# public_subnet_cidr         = "10.0.0.0/24"
+# private_subnet_cidr        = "10.0.1.0/24"
+# object_lock_retention_days = 30
+# log_retention_days         = 14
+# tmpfs_size_mib             = 64

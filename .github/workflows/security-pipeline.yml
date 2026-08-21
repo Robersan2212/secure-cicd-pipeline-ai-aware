@@ -1,0 +1,567 @@
+name: Security Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # needed to upload SARIF to the Security tab
+  # id-token is granted per-job on agent jobs (OIDC → AWS)
+
+jobs:
+  semgrep-scan:
+    name: semgrep-scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep   # always current Semgrep CLI, avoids the deprecated wrapper action
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          set +e
+          semgrep ci --config p/owasp-top-ten --config p/security-audit --sarif --output=semgrep.sarif
+          code=$?
+          set -e
+          if [[ ! -f semgrep.sarif ]]; then
+            echo '{"version":"2.1.0","runs":[]}' > semgrep.sarif
+          fi
+          exit "${code}"
+
+      - name: Upload Semgrep SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-semgrep
+          path: semgrep.sarif
+          if-no-files-found: warn
+
+  dependency-scan:
+    name: dependency-scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
+
+      - name: Export npm audit JSON
+        if: always()
+        run: |
+          npm audit --json > npm-audit.json 2>/dev/null || echo '{}' > npm-audit.json
+
+      - name: Upload npm audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-npm-audit
+          path: app/npm-audit.json
+          if-no-files-found: warn
+
+  secrets-scan:
+    name: secrets-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so Gitleaks can scan past commits, not just HEAD
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Custom rules (incl. LLM API key patterns) go in .gitleaks.toml at repo root
+
+      - name: Export Gitleaks JSON report
+        if: always()
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.24.0/gitleaks_8.24.0_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . -f json -r gitleaks-report.json --exit-code 0 || true
+          if [[ ! -f gitleaks-report.json ]]; then
+            echo '[]' > gitleaks-report.json
+          fi
+
+      - name: Upload Gitleaks artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-gitleaks
+          path: gitleaks-report.json
+          if-no-files-found: warn
+
+  container-scan:
+    name: container-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t secure-cicd-demo:${{ github.sha }} ./app
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: secure-cicd-demo:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'   # fail build on high/critical findings
+
+      - name: Upload Trivy results to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-trivy
+          path: trivy-results.sarif
+          if-no-files-found: warn
+
+  # Disposable Fargate agent: upload CI logs → OIDC → RunTask → read audit → PR comment.
+  # The agent never talks to GitHub; CI posts the comment with GITHUB_TOKEN.
+  log-integrity-agent:
+    name: log-integrity-agent
+    runs-on: ubuntu-latest
+    needs:
+      - semgrep-scan
+      - dependency-scan
+      - secrets-scan
+      - container-scan
+    # Run even if a scan failed — the agent is meant to review pipeline outcomes.
+    if: always()
+    permissions:
+      id-token: write       # GitHub OIDC → AWS
+      contents: read
+      actions: read         # download sibling job logs for the agent
+      pull-requests: write  # post findings comment on PRs
+    env:
+      AUDIT_OBJECT_KEY: results/${{ github.run_id }}/${{ github.sha }}.md
+      INTEGRITY_OBJECT_KEY: results/${{ github.run_id }}/integrity.json
+      LOGS_PREFIX: logs/${{ github.run_id }}
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-duration-seconds: 900   # 15-minute session (role ceiling is 3600)
+          audience: sts.amazonaws.com
+
+      - name: Collect sibling job logs and upload for agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          WORK="$(mktemp -d)"
+          mkdir -p "${WORK}/logs"
+
+          # List sibling jobs (exclude agent jobs).
+          gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | select(.name != "log-integrity-agent" and .name != "triage-summary-agent") | {id,name,conclusion,status}' \
+            > "${WORK}/jobs.jsonl"
+
+          download_job_logs() {
+            local job_id="$1"
+            local out="$2"
+            # Logs API returns 302 → short-lived signed URL. Use curl -L (not gh api):
+            # gh often fails the redirect / auth-header handoff and leaves an empty body.
+            local code
+            code=$(curl -sS -L -o "${out}" -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/jobs/${job_id}/logs" \
+              || true)
+            echo "${code}"
+          }
+
+          extract_log_text() {
+            local archive="$1"
+            local dest="$2"
+            if unzip -l "${archive}" >/dev/null 2>&1; then
+              # Job log zips can contain multiple *.txt files; concatenate them.
+              unzip -p "${archive}" > "${dest}" 2>/dev/null || true
+            else
+              # Some responses are already plain text.
+              cp "${archive}" "${dest}" 2>/dev/null || true
+            fi
+          }
+
+          MANIFEST_JOBS='[]'
+          while IFS= read -r row; do
+            [[ -z "$row" ]] && continue
+            JOB_ID=$(echo "$row" | jq -r .id)
+            JOB_NAME=$(echo "$row" | jq -r .name)
+            CONCLUSION=$(echo "$row" | jq -r .conclusion)
+            STATUS=$(echo "$row" | jq -r .status)
+            SAFE_NAME=$(echo "$JOB_NAME" | tr -c 'A-Za-z0-9._-' '_' )
+            LOG_FILE="${WORK}/logs/${SAFE_NAME}.txt"
+            LOG_KEY="${LOGS_PREFIX}/${SAFE_NAME}.txt"
+            RAW="${WORK}/${JOB_ID}.bin"
+
+            HTTP_CODE=$(download_job_logs "${JOB_ID}" "${RAW}")
+            echo "job=${JOB_NAME} id=${JOB_ID} logs_http=${HTTP_CODE} bytes=$(wc -c < "${RAW}" 2>/dev/null || echo 0)"
+
+            if [[ "${HTTP_CODE}" == "200" && -s "${RAW}" ]]; then
+              extract_log_text "${RAW}" "${LOG_FILE}"
+            fi
+
+            if [[ ! -s "${LOG_FILE:-}" ]]; then
+              echo "(no log body downloaded for ${JOB_NAME}; http=${HTTP_CODE})" > "${LOG_FILE}"
+            fi
+
+            aws s3 cp "${LOG_FILE}" "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${LOG_KEY}" --only-show-errors
+
+            MANIFEST_JOBS=$(echo "$MANIFEST_JOBS" | jq \
+              --arg name "$JOB_NAME" \
+              --arg conclusion "$CONCLUSION" \
+              --arg status "$STATUS" \
+              --arg log_key "$LOG_KEY" \
+              '. + [{name:$name, conclusion:$conclusion, status:$status, log_key:$log_key}]')
+          done < "${WORK}/jobs.jsonl"
+
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg sha "${{ github.sha }}" \
+            --argjson jobs "$MANIFEST_JOBS" \
+            '{repository:$repo, run_id:$run_id, sha:$sha, jobs:$jobs}' \
+            > "${WORK}/manifest.json"
+
+          aws s3 cp "${WORK}/manifest.json" \
+            "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${LOGS_PREFIX}/manifest.json" \
+            --only-show-errors
+
+          echo "Uploaded job logs and manifest for agent analysis."
+
+      - name: Run ephemeral ECS Fargate agent task
+        id: run_task
+        run: |
+          set -euo pipefail
+          OVERRIDES=$(jq -nc \
+            --arg bucket "${{ secrets.AUDIT_BUCKET_NAME }}" \
+            --arg key "${AUDIT_OBJECT_KEY}" \
+            --arg integrity "${INTEGRITY_OBJECT_KEY}" \
+            --arg logs "${LOGS_PREFIX}" \
+            --arg secret "${{ secrets.LLM_API_KEY_SECRET_ARN }}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg repo "${{ github.repository }}" \
+            '{containerOverrides:[{name:"agent",environment:[
+              {name:"AUDIT_BUCKET",value:$bucket},
+              {name:"AUDIT_OBJECT_KEY",value:$key},
+              {name:"INTEGRITY_OBJECT_KEY",value:$integrity},
+              {name:"LOGS_PREFIX",value:$logs},
+              {name:"LLM_API_KEY_SECRET_ARN",value:$secret},
+              {name:"GITHUB_RUN_ID",value:$run_id},
+              {name:"GITHUB_SHA",value:$sha},
+              {name:"GITHUB_REPOSITORY",value:$repo}
+            ]}]}')
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --task-definition "${{ secrets.ECS_TASK_DEFINITION }}" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.ECS_SUBNET_ID }}],securityGroups=[${{ secrets.ECS_SECURITY_GROUP_ID }}],assignPublicIp=DISABLED}" \
+            --overrides "${OVERRIDES}" \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          if [[ -z "${TASK_ARN}" || "${TASK_ARN}" == "None" ]]; then
+            echo "Failed to start ECS task" >&2
+            exit 1
+          fi
+
+          echo "task_arn=${TASK_ARN}" >> "$GITHUB_OUTPUT"
+          echo "Started ECS Fargate agent task."
+
+      - name: Wait for agent task to stop
+        run: |
+          set -euo pipefail
+          aws ecs wait tasks-stopped \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --tasks "${{ steps.run_task.outputs.task_arn }}"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --tasks "${{ steps.run_task.outputs.task_arn }}" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+          echo "Container exit code: ${EXIT_CODE}"
+
+      - name: Fetch audit findings from S3
+        id: audit
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/agent
+          if aws s3api head-object \
+            --bucket "${{ secrets.AUDIT_BUCKET_NAME }}" \
+            --key "${AUDIT_OBJECT_KEY}" >/dev/null 2>&1; then
+            aws s3 cp "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${AUDIT_OBJECT_KEY}" /tmp/agent/findings.md --only-show-errors
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            cat > /tmp/agent/findings.md <<'EOF'
+          ## Log integrity agent (no audit object yet)
+
+          No audit findings object was written for this run.
+
+          This usually means the agent image is missing, failed before writing, or logs were unavailable.
+          EOF
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment findings on pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            // Body already includes the H2 from the agent (or the fallback above).
+            const body = fs.readFileSync('/tmp/agent/findings.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  # Triage agent: upload scan artifacts → RunTask → Gitleaks → PR comment.
+  # Gates on results/<run_id>/integrity.json from log-integrity (fail closed inside the task).
+  triage-summary-agent:
+    name: triage-summary-agent
+    runs-on: ubuntu-latest
+    needs:
+      - log-integrity-agent
+      - semgrep-scan
+      - dependency-scan
+      - secrets-scan
+      - container-scan
+    if: always()
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: write
+    env:
+      FINDINGS_PREFIX: findings/${{ github.run_id }}
+      TRIAGE_OBJECT_KEY: triage/${{ github.run_id }}.json
+      INTEGRITY_OBJECT_KEY: results/${{ github.run_id }}/integrity.json
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-duration-seconds: 900
+          audience: sts.amazonaws.com
+
+      - name: Download scan finding artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/findings-artifacts
+          pattern: findings-*
+          merge-multiple: false
+
+      - name: Upload findings to S3 for triage agent
+        run: |
+          set -euo pipefail
+          ROOT="/tmp/findings-artifacts"
+          if [[ ! -d "${ROOT}" ]]; then
+            echo "No findings artifacts directory; continuing (triage may no-op)."
+            exit 0
+          fi
+          # Artifact layout: findings-<name>/<file>
+          while IFS= read -r -d '' f; do
+            base="$(basename "${f}")"
+            aws s3 cp "${f}" \
+              "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${FINDINGS_PREFIX}/${base}" \
+              --only-show-errors
+            echo "uploaded ${base}"
+          done < <(find "${ROOT}" -type f -print0)
+
+      - name: Run ephemeral ECS triage task
+        id: run_triage
+        run: |
+          set -euo pipefail
+          OVERRIDES=$(jq -nc \
+            --arg bucket "${{ secrets.AUDIT_BUCKET_NAME }}" \
+            --arg findings "${FINDINGS_PREFIX}" \
+            --arg triage "${TRIAGE_OBJECT_KEY}" \
+            --arg integrity "${INTEGRITY_OBJECT_KEY}" \
+            --arg secret "${{ secrets.LLM_API_KEY_SECRET_ARN }}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg sha "${{ github.sha }}" \
+            '{containerOverrides:[{name:"agent",environment:[
+              {name:"AUDIT_BUCKET",value:$bucket},
+              {name:"FINDINGS_PREFIX",value:$findings},
+              {name:"TRIAGE_OBJECT_KEY",value:$triage},
+              {name:"INTEGRITY_OBJECT_KEY",value:$integrity},
+              {name:"LLM_API_KEY_SECRET_ARN",value:$secret},
+              {name:"RUN_ID",value:$run_id},
+              {name:"GITHUB_RUN_ID",value:$run_id},
+              {name:"GITHUB_SHA",value:$sha}
+            ]}]}')
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --task-definition "${{ secrets.ECS_TRIAGE_TASK_DEFINITION }}" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.ECS_SUBNET_ID }}],securityGroups=[${{ secrets.ECS_SECURITY_GROUP_ID }}],assignPublicIp=DISABLED}" \
+            --overrides "${OVERRIDES}" \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          if [[ -z "${TASK_ARN}" || "${TASK_ARN}" == "None" ]]; then
+            echo "Failed to start triage ECS task" >&2
+            exit 1
+          fi
+
+          echo "task_arn=${TASK_ARN}" >> "$GITHUB_OUTPUT"
+          echo "Started ECS Fargate triage task."
+
+      - name: Wait for triage task to stop
+        run: |
+          set -euo pipefail
+          aws ecs wait tasks-stopped \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --tasks "${{ steps.run_triage.outputs.task_arn }}"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --tasks "${{ steps.run_triage.outputs.task_arn }}" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+          echo "Triage container exit code: ${EXIT_CODE}"
+
+      - name: Fetch triage JSON from S3
+        id: triage
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/triage
+          if aws s3api head-object \
+            --bucket "${{ secrets.AUDIT_BUCKET_NAME }}" \
+            --key "${TRIAGE_OBJECT_KEY}" >/dev/null 2>&1; then
+            aws s3 cp "s3://${{ secrets.AUDIT_BUCKET_NAME }}/${TRIAGE_OBJECT_KEY}" \
+              /tmp/triage/triage.json --only-show-errors
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No triage object (integrity gate may have blocked publish)."
+          fi
+
+      - name: Gitleaks scan triage output before publish
+        id: gitleaks_triage
+        if: steps.triage.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.24.0/gitleaks_8.24.0_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          set +e
+          # /tmp/triage is not a git repo — scan files only. Write report outside the source dir.
+          ./gitleaks detect --no-git --source /tmp/triage/triage.json \
+            -f json -r /tmp/gitleaks-triage-out.json --exit-code 1
+          code=$?
+          set -e
+          if [[ "${code}" -eq 0 ]]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "Gitleaks hit on triage output - blocking PR comment." >&2
+          fi
+
+      - name: Comment triage summary on pull request
+        if: >
+          github.event_name == 'pull_request'
+          && steps.triage.outputs.found == 'true'
+          && steps.gitleaks_triage.outputs.clean == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/tmp/triage/triage.json', 'utf8'));
+            const summarized = data.summarized || [];
+            const unsummarized = data.unsummarized || [];
+            const sections = [
+              ['semgrep-scan', 'Semgrep (SAST)'],
+              ['container-scan', 'Container (Trivy)'],
+              ['dependency-scan', 'Dependencies (npm audit)'],
+              ['secrets-scan', 'Secrets (Gitleaks)'],
+            ];
+            const byTool = {};
+            for (const item of summarized) {
+              const t = item.tool || 'unknown';
+              (byTool[t] ||= []).push(item);
+            }
+            const lines = [
+              '## Triage summary agent',
+              '',
+              `- Workflow run: \`${data.run_id || context.runId}\``,
+              `- Summarized findings: ${summarized.length}`,
+              `- Not summarized (validation failed): ${unsummarized.length}`,
+              '',
+            ];
+            if (summarized.length === 0 && unsummarized.length === 0) {
+              lines.push('_No scanner findings were available to triage._');
+            }
+            for (const [tool, title] of sections) {
+              const items = byTool[tool] || [];
+              lines.push(`### ${title}`);
+              if (items.length === 0) {
+                lines.push('_No findings selected for this scanner (artifact empty or unavailable)._');
+                lines.push('');
+                continue;
+              }
+              for (const item of items) {
+                lines.push(`#### \`${item.rule_id}\` (${item.severity})`);
+                lines.push(`- Location: \`${item.file_location || 'n/a'}\``);
+                lines.push(`- Summary: ${item.plain_language_summary}`);
+                lines.push(`- Remediation: ${item.suggested_remediation}`);
+                lines.push('');
+              }
+            }
+            const known = new Set(sections.map(([t]) => t));
+            const other = summarized.filter((i) => !known.has(i.tool));
+            if (other.length > 0) {
+              lines.push('### Other');
+              for (const item of other) {
+                lines.push(`- ${item.tool}: \`${item.rule_id}\` (${item.severity})`);
+              }
+              lines.push('');
+            }
+            if (unsummarized.length > 0) {
+              lines.push('### Not summarized');
+              for (const u of unsummarized.slice(0, 20)) {
+                lines.push(`- ${u.tool || 'unknown'}: \`${u.rule_id || '?'}\``);
+              }
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: lines.join('\n'),
+            });
